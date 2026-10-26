@@ -119,14 +119,13 @@ namespace SplitWireTurkey.Services
                     // sürücü kaydını TAMAMLAMAK için gereken bir yeniden başlatma bekleniyordur) ve
                     // "connect" denemeden AÇIKÇA hata veriyoruz -- yanlış "başarılı" raporu vermek
                     // yerine.
-                    var servicesRegisteredBefore = await IsServiceRunningAsync();
+                    var servicesRegisteredBefore = await Task.Run(() => AreRequiredWireSockServicesRegistered(wiresockExe));
                     if (!servicesRegisteredBefore)
                     {
                         Debug.WriteLine("WireSockAppService/WireSockConnectService kayıtlı değil -- temel ürün kurulumu eksik veya yarım kalmış olabilir.");
                         System.Windows.MessageBox.Show(
                             "WireSock arka plan servisleri (WireSockAppService/WireSockConnectService) sistemde kayıtlı değil. " +
-                            "Bu genellikle WireSock'un temel kurulumunun (sürücü kaydı) tamamlanması için bir SİSTEM YENİDEN BAŞLATMASI " +
-                            "gerektiği anlamına gelir. Lütfen bilgisayarı yeniden başlatıp kurulumu tekrar deneyin.",
+                            "WireSock kurulumu eksik veya hizmetler kaldırılmış. Lütfen WireSock kurulumunu uygulama üzerinden tekrar çalıştırın.",
                             LanguageManager.GetText("messages", "unexpected_error_title"), MessageBoxButton.OK, MessageBoxImage.Warning);
                         return false;
                     }
@@ -387,12 +386,17 @@ namespace SplitWireTurkey.Services
 
         public bool IsWireSockInstalled()
         {
-            return !string.IsNullOrEmpty(FindWireSockPath());
+            var path = FindWireSockPath();
+            return !string.IsNullOrEmpty(path) && AreRequiredWireSockServicesRegistered(path);
         }
 
         public async Task<bool> IsWireSockInstalledAsync()
         {
-            return await Task.Run(() => !string.IsNullOrEmpty(FindWireSockPathOptimized()));
+            return await Task.Run(() =>
+            {
+                var path = FindWireSockPathOptimized();
+                return !string.IsNullOrEmpty(path) && AreRequiredWireSockServicesRegistered(path);
+            });
         }
 
         // ÖNEMLİ (kullanıcının "WireSock hizmeti yine kurulmadı" bildirimiyle bulunan kök sebep):
@@ -404,9 +408,12 @@ namespace SplitWireTurkey.Services
         // ÇALIŞTIRMIYORDU -- silinen servisler bir daha asla yeniden kurulmuyordu. Artık dosya
         // varlığına EK OLARAK servislerin GERÇEKTEN kayıtlı olduğunu da (senkron sc query ile)
         // doğruluyoruz.
-        private bool IsAnyWireSockServiceRegisteredSync()
+        private bool AreRequiredWireSockServicesRegistered(string path)
         {
-            foreach (var svc in new[] { "WireSockAppService", "WireSockConnectService", "wiresock-client-service" })
+            var serviceNames = IsModernWireSock(path)
+                ? new[] { "WireSockAppService", "WireSockConnectService" }
+                : new[] { "wiresock-client-service" };
+            foreach (var svc in serviceNames)
             {
                 try
                 {
@@ -421,14 +428,14 @@ namespace SplitWireTurkey.Services
                     };
                     using var process = Process.Start(psi);
                     process.WaitForExit();
-                    if (process.ExitCode == 0)
+                    if (process.ExitCode != 0)
                     {
-                        return true;
+                        return false;
                     }
                 }
-                catch { /* servis kontrolü başarısız olursa diğer isme geç */ }
+                catch { return false; }
             }
-            return false;
+            return true;
         }
 
         public bool IsLatestWireSockInstalled()
@@ -461,7 +468,7 @@ namespace SplitWireTurkey.Services
                         // Dosya varlığı TEK BAŞINA yeterli değil -- servisler de kayıtlı olmalı,
                         // yoksa "zaten kurulu" yanlış pozitifi kurulumu atlatıp bir daha hiç
                         // düzeltilemeyecek bir duruma yol açıyordu.
-                        if (File.Exists(path) && IsAnyWireSockServiceRegisteredSync())
+                        if (File.Exists(path) && AreRequiredWireSockServicesRegistered(path))
                             return true;
                     }
                 }
