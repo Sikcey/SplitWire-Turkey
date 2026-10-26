@@ -139,29 +139,33 @@ namespace SplitWireTurkey.Services
                     if (string.IsNullOrWhiteSpace(profileName))
                         profileName = "wgcf-profile";
 
+                    await ExecuteCommandAsync(wiresockExe, "disconnect");
+
                     // 2. Varsa eski profili temizle
                     await ExecuteCommandAsync(wiresockExe, $"delete \"{profileName}\"");
 
                     // 3. Yeni profili içe aktar
-                    var importResult = await ExecuteCommandAsync(wiresockExe, $"import \"{configPath}\"");
-                    if (importResult != 0)
+                    var importResult = await RunCommandAsync(wiresockExe, $"import \"{configPath}\"");
+                    if (importResult.ExitCode != 0)
                     {
-                        Debug.WriteLine($"WireSock 3.x profil içe aktarılamadı (Exit Code: {importResult})");
+                        MessageBox.Show(string.Format(LanguageManager.GetText("messages", "wiresock_install_failed"),
+                            importResult.Output), LanguageManager.GetText("messages", "unexpected_error_title"),
+                            MessageBoxButton.OK, MessageBoxImage.Error);
+                        return false;
                     }
 
                     // 4. Profile bağlan ve arka planda çalışması için -exit parametresi ver
-                    var connectResult = await ExecuteCommandAsync(wiresockExe, $"connect \"{profileName}\" -exit");
-                    Debug.WriteLine($"WireSock connect exit code: {connectResult}");
+                    var connectResult = await RunCommandAsync(wiresockExe, $"connect \"{profileName}\" -exit");
 
-                    // 5. Hizmetin GERÇEKTEN kayıtlı/çalışır durumda olduğunu doğrula -- SADECE
-                    // connectResult==0'a güvenmiyoruz artık (yukarıdaki not), gerçek servis
-                    // durumunu birkaç kez (servis "connect" sonrası anında sorgulanamayabilir)
-                    // kontrol ediyoruz.
                     var isRunning = false;
-                    for (int attempt = 0; attempt < 4 && !isRunning; attempt++)
+                    var statusOutput = connectResult.Output;
+                    for (int attempt = 0; connectResult.ExitCode == 0 && attempt < 15 && !isRunning; attempt++)
                     {
                         if (attempt > 0) await Task.Delay(1000);
-                        isRunning = await IsServiceRunningAsync();
+                        var status = await RunCommandAsync(wiresockExe, "status");
+                        statusOutput = status.Output;
+                        isRunning = status.ExitCode == 0 &&
+                            status.Output.Contains(profileName, StringComparison.OrdinalIgnoreCase);
                     }
 
                     if (isRunning)
@@ -170,7 +174,8 @@ namespace SplitWireTurkey.Services
                     }
                     else
                     {
-                        System.Windows.MessageBox.Show(string.Format(LanguageManager.GetText("messages", "wiresock_install_failed"), connectResult),
+                        System.Windows.MessageBox.Show(string.Format(LanguageManager.GetText("messages", "wiresock_install_failed"),
+                            $"{connectResult.Output}\n{statusOutput}"),
                             LanguageManager.GetText("messages", "unexpected_error_title"), MessageBoxButton.OK, MessageBoxImage.Error);
                         return false;
                     }
@@ -318,31 +323,66 @@ namespace SplitWireTurkey.Services
 
         private async Task<int> ExecuteCommandAsync(string command, string arguments)
         {
-            return await Task.Run(() =>
+            return (await RunCommandAsync(command, arguments)).ExitCode;
+        }
+
+        private async Task<(int ExitCode, string Output)> RunCommandAsync(string command, string arguments)
+        {
+            try
             {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = command,
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using var process = new Process { StartInfo = startInfo };
+                process.Start();
+                var outputTask = process.StandardOutput.ReadToEndAsync();
+                var errorTask = process.StandardError.ReadToEndAsync();
+                var timedOut = false;
                 try
                 {
-                    var startInfo = new ProcessStartInfo
-                    {
-                        FileName = command,
-                        Arguments = arguments,
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using var process = new Process { StartInfo = startInfo };
-                    process.Start();
-                    process.WaitForExit();
-                    return process.ExitCode;
+                    await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
                 }
-                catch (Exception ex)
+                catch (TimeoutException)
                 {
-                    Debug.WriteLine($"Command execution failed: {ex.Message}");
-                    return -1;
+                    timedOut = true;
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
                 }
-            });
+                var output = $"{await outputTask}\n{await errorTask}".Trim();
+                if (timedOut) output = $"Command timed out after 30 seconds.\n{output}";
+                var exitCode = timedOut ? -1 : process.ExitCode;
+                LogCommand(command, arguments, exitCode, output);
+                return (exitCode, output);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Command execution failed: {ex.Message}");
+                LogCommand(command, arguments, -1, ex.Message);
+                return (-1, ex.Message);
+            }
+        }
+
+        private static void LogCommand(string command, string arguments, int exitCode, string output)
+        {
+            try
+            {
+                var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "SplitWire-Turkey", "Logs");
+                Directory.CreateDirectory(directory);
+                File.AppendAllText(Path.Combine(directory, "wiresock.log"),
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {Path.GetFileName(command)} {arguments}\nExit Code: {exitCode}\n{output}\n");
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"WireSock log failed: {ex.Message}");
+            }
         }
 
         public bool IsWireSockInstalled()
@@ -487,4 +527,4 @@ namespace SplitWireTurkey.Services
             }
         }
     }
-} 
+}
