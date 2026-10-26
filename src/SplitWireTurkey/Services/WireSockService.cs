@@ -156,6 +156,7 @@ namespace SplitWireTurkey.Services
                     // 4. Profile bağlan ve arka planda çalışması için -exit parametresi ver
                     var connectResult = await RunCommandAsync(wiresockExe, $"connect \"{profileName}\" -exit");
 
+                    // Service registration alone does not confirm a connected tunnel; poll CLI status for the active profile.
                     var isRunning = false;
                     var statusOutput = connectResult.Output;
                     for (int attempt = 0; connectResult.ExitCode == 0 && attempt < 15 && !isRunning; attempt++)
@@ -427,13 +428,22 @@ namespace SplitWireTurkey.Services
                         CreateNoWindow = true
                     };
                     using var process = Process.Start(psi);
+                    var outputTask = process.StandardOutput.ReadToEndAsync();
+                    var errorTask = process.StandardError.ReadToEndAsync();
                     process.WaitForExit();
+                    var output = $"{outputTask.GetAwaiter().GetResult()}\n{errorTask.GetAwaiter().GetResult()}".Trim();
+                    LogCommand("sc", $"query {svc}", process.ExitCode, output);
                     if (process.ExitCode != 0)
                     {
                         return false;
                     }
                 }
-                catch { return false; }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Service registration check failed for {svc}: {ex.Message}");
+                    LogCommand("sc", $"query {svc}", -1, ex.Message);
+                    return false;
+                }
             }
             return true;
         }
